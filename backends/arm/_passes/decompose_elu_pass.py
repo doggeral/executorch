@@ -120,6 +120,8 @@ class DecomposeEluPass(ArmPass):
 
     _passes_required_after: Set[Type[ExportPass]] = set()
 
+    targeted_ops = {*edge_elu_ops}
+
     def call_operator(self, op, args, kwargs, meta):
         if op not in edge_elu_family_ops:
             return super().call_operator(op, args, kwargs, meta, updated=False)
