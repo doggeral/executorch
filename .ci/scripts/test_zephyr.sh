@@ -137,7 +137,7 @@ run_west_sdk_install_with_proxy_fallback() {
   proxy_url="http://127.0.0.1:${proxy_port}/releases"
   proxy_cache_dir="${ZEPHYR_SDK_RELEASE_PROXY_CACHE_DIR:-${HOME}/.cache/zephyr-sdk/v${sdk_version}}"
 
-  "${EXECUTORCH_PROJ_ROOT}/.ci/scripts/zephyr_sdk_release_proxy.py" \
+  python3 "${EXECUTORCH_PROJ_ROOT}/.ci/scripts/zephyr_sdk_release_proxy.py" \
     --version "${sdk_version}" \
     --cache-dir "${proxy_cache_dir}" \
     --port "${proxy_port}" &
