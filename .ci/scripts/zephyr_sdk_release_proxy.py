@@ -121,7 +121,12 @@ def verify_asset(cache_dir: Path, checksums: dict[str, str], filename: str) -> N
     if expected is None:
         raise AssetVerificationError(f"No checksum entry for {filename}")
 
-    digest = hashlib.sha256((cache_dir / filename).read_bytes()).hexdigest()
+    hasher = hashlib.sha256()
+    with (cache_dir / filename).open("rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            hasher.update(chunk)
+    digest = hasher.hexdigest()
+
     if digest != expected:
         raise AssetVerificationError(
             f"Checksum mismatch for {filename}: expected {expected}, got {digest}"
