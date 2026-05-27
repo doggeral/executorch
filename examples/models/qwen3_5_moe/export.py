@@ -936,6 +936,7 @@ def _export_cuda(model, config, args):
     )
     from executorch.exir.backend.compile_spec_schema import CompileSpec
     from executorch.exir.passes import MemoryPlanningPass
+    from executorch.exir.passes.propagate_device_pass import PropagateDeviceConfig
     from torch.export import Dim, export
 
     # Coordinate descent recompiles each kernel trying config perturbations,
@@ -990,6 +991,23 @@ def _export_cuda(model, config, args):
         )
     print("Prefill export successful!")
 
+    # Export sample method by temporarily swapping model.forward
+    print("Exporting sample method with torch.export...")
+    original_forward = model.forward
+    model.forward = model.sample
+    example_logits = torch.zeros(1, 2, config.vocab_size, dtype=torch.bfloat16)
+    example_temperature = torch.tensor([0.8], dtype=torch.float32)
+    sample_dynamic_shapes = ({1: seq_dim}, None)
+    with torch.no_grad():
+        exported_sample = export(
+            model,
+            (example_logits, example_temperature),
+            dynamic_shapes=sample_dynamic_shapes,
+            strict=True,
+        )
+    model.forward = original_forward
+    print("Sample export successful!")
+
     # Lower with CUDA backend (per-method partitioners to avoid so_blob collision)
     print("Lowering to ExecuTorch with CUDA...")
 
@@ -1002,7 +1020,7 @@ def _export_cuda(model, config, args):
         "enable_dynamic_shape": True,
     }
     et_prog = to_edge_transform_and_lower(
-        {"decode": decode_ep, "prefill": prefill_ep},
+        {"decode": decode_ep, "prefill": prefill_ep, "sample": exported_sample},
         partitioner={
             "decode": [
                 CudaPartitioner(
@@ -1020,6 +1038,11 @@ def _export_cuda(model, config, args):
                     ]
                 )
             ],
+            "sample": [
+                CudaPartitioner(
+                    [CudaBackend.generate_method_name_compile_spec("sample")]
+                )
+            ],
         },
         compile_config=EdgeCompileConfig(
             _check_ir_validity=False,
@@ -1033,9 +1056,13 @@ def _export_cuda(model, config, args):
             do_quant_fusion_and_const_prop=True,
             memory_planning_pass=MemoryPlanningPass(
                 alloc_graph_input=False,
+                enable_non_cpu_memory_planning=True,
                 share_mutable_buffers=True,
             ),
-            emit_mutable_buffer_names=True,
+            propagate_device_config=PropagateDeviceConfig(
+                skip_h2d_for_method_inputs=True,
+                skip_d2h_for_method_outputs=True,
+            ),
         ),
     )
 

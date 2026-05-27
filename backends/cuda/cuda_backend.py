@@ -253,8 +253,7 @@ class CudaBackend(AotiBackend, BackendDetails):
                 mode = spec.value.decode("utf-8").upper()
                 if mode not in ["ON", "OFF"]:
                     raise ValueError(
-                        f"Invalid triton_kernel_mode: {mode}. "
-                        f"Expected 'ON' or 'OFF'."
+                        f"Invalid triton_kernel_mode: {mode}. Expected 'ON' or 'OFF'."
                     )
                 triton_kernel_mode = mode
         passes = [MoveCondPredicateToCpuPass()]

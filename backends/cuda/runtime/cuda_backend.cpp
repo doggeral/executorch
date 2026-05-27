@@ -469,7 +469,16 @@ class ET_EXPERIMENTAL CudaBackend final
     return (DelegateHandle*)handle; // Return the handle post-processing
   }
 
-  // Once per execution
+  // Execute the AOTI-compiled CUDA kernel for one inference step.
+  //
+  // Currently supports both CPU and CUDA memory for IO tensors:
+  //   - Inputs: detected via cudaPointerGetAttributes; CUDA data is wrapped
+  //     in-place (no copy), CPU data is copied to GPU via from_etensor().
+  //   - Outputs: either copied to ETensor's backing memory (CPU or CUDA),
+  //     or the ETensor is rewired to point at GPU memory (skip-copy mode).
+  //
+  // TODO: Once the device tensor pipeline is fully adopted, all IO tensors
+  // will reside in CUDA memory. Remove the CPU fallback paths.
   Error execute(
       BackendExecutionContext& context,
       DelegateHandle* handle_,
@@ -494,14 +503,17 @@ class ET_EXPERIMENTAL CudaBackend final
         n_outputs,
         args.size())
 
-    // Verify device info on all memory-planned, ET-driven IO tensors.
-    // All input and output tensors should have device_type = CUDA, which
-    // is set during serialization by PropagateDevicePass based on the
-    // target_device compile spec from CudaPartitioner.
+    // Verify device metadata on all IO tensors.
+    // All tensors should have device_type = CUDA, set during serialization
+    // by PropagateDevicePass based on the target_device compile spec from
+    // CudaPartitioner.
     //
-    // Note: At this stage, the tensor memory is still on CPU. The device_type
-    // is metadata indicating where the tensor *should* reside. The backend
-    // is responsible for copying data to the actual CUDA device.
+    // Note: device_type is metadata — the actual memory location may be
+    // either CPU (legacy path with H2D copy ops) or CUDA (when device
+    // memory planning is enabled via enable_non_cpu_memory_planning,
+    // which allocates delegate IO in CUDA memory). The backend detects
+    // the actual location via cudaPointerGetAttributes and handles both
+    // cases.
     for (size_t i = 0; i < n_inputs + n_outputs; i++) {
       auto* tensor = &(args[i]->toTensor());
       auto device_type = tensor->unsafeGetTensorImpl()->device_type();
@@ -582,13 +594,13 @@ class ET_EXPERIMENTAL CudaBackend final
     std::vector<SlimTensor*> gpu_inputs(n_inputs);
     std::vector<SlimTensor*> gpu_outputs(n_outputs);
 
-    // Process input tensors: convert ETensor (CPU) to SlimTensor (GPU)
+    // Process input tensors: convert ETensor to SlimTensor
     for (size_t i = 0; i < n_inputs; i++) {
-      auto* cpu_tensor = &(args[i]->toTensor());
+      auto* input_tensor = &(args[i]->toTensor());
 
       // CAPTURE step: allocate persistent static GPU buffers
       if (is_capture_step) {
-        size_t nbytes = cpu_tensor->nbytes();
+        size_t nbytes = input_tensor->nbytes();
 
         void* static_ptr = nullptr;
         cudaError_t merr = cudaMalloc(&static_ptr, nbytes);
@@ -601,7 +613,7 @@ class ET_EXPERIMENTAL CudaBackend final
 
         cudaMemcpy(
             static_ptr,
-            cpu_tensor->const_data_ptr(),
+            input_tensor->const_data_ptr(),
             nbytes,
             cudaMemcpyHostToDevice);
 
@@ -609,38 +621,41 @@ class ET_EXPERIMENTAL CudaBackend final
         handle->cuda_graph_state.static_input_nbytes.push_back(nbytes);
 
         gpu_inputs[i] = make_slimtensor_from_blob_with_etensor_metadata(
-            static_ptr, cpu_tensor);
+            static_ptr, input_tensor);
         continue;
       }
 
       // Check if input data is already on GPU (skip-copy optimization for
       // inputs) This can happen when the caller has pre-staged data on GPU
       cudaPointerAttributes attributes{};
-      const void* data_ptr = cpu_tensor->const_data_ptr();
+      const void* data_ptr = input_tensor->const_data_ptr();
       if (data_ptr != nullptr) {
         cudaError_t err = cudaPointerGetAttributes(&attributes, data_ptr);
         if (err == cudaSuccess && attributes.type == cudaMemoryTypeDevice) {
           // Data is already on GPU - wrap it directly without copy
           gpu_inputs[i] = make_slimtensor_from_blob_with_etensor_metadata(
-              const_cast<void*>(data_ptr), cpu_tensor);
+              const_cast<void*>(data_ptr), input_tensor);
 
           continue;
         }
       }
 
-      // Data is on CPU - use from_etensor to copy to GPU
+      // Data is in CPU memory (legacy path) — copy to GPU via from_etensor.
+      // TODO: Remove this path once all callers use the device tensor pipeline.
       gpu_inputs[i] = new SlimTensor(
-          from_etensor(*cpu_tensor, CPU_DEVICE, DEFAULT_CUDA_DEVICE));
+          from_etensor(*input_tensor, CPU_DEVICE, DEFAULT_CUDA_DEVICE));
     }
 
-    // Process output tensors: create GPU SlimTensors for kernel output.
-    // Save pre-run handles to detect orphans after run().
+    // Allocate GPU SlimTensors for kernel outputs. These are always
+    // freshly allocated on GPU regardless of the input memory mode.
+    // Save pre-run handles to detect orphans after run() (the AOTI
+    // runtime may replace output handles with its own allocations).
     std::vector<SlimTensor*> pre_run_outputs(n_outputs, nullptr);
     for (size_t i = 0; i < n_outputs; i++) {
-      auto* cpu_output_tensor = &(args[i + n_inputs]->toTensor());
-      auto sizes = cpu_output_tensor->sizes();
-      auto strides = cpu_output_tensor->strides();
-      auto scalar_type = cpu_output_tensor->scalar_type();
+      auto* output_tensor = &(args[i + n_inputs]->toTensor());
+      auto sizes = output_tensor->sizes();
+      auto strides = output_tensor->strides();
+      auto scalar_type = output_tensor->scalar_type();
 
       std::vector<int64_t> sizes_vec(sizes.begin(), sizes.end());
       std::vector<int64_t> strides_vec(strides.begin(), strides.end());
@@ -801,13 +816,18 @@ class ET_EXPERIMENTAL CudaBackend final
 
     const bool copy_outputs = !should_skip_copy_for_method(handle->method_name);
 
+    // Output disposition: copy to ETensor backing memory or keep on GPU.
+    // When copy_outputs is true (default), results are copied to the
+    // ETensor's memory (which may be CPU or CUDA planned memory).
+    // When false (skip-copy optimization), the ETensor is rewired to
+    // point at the GPU SlimTensor's memory directly.
     if (copy_outputs) {
       for (size_t i = 0; i < n_outputs; i++) {
-        auto* cpu_output_tensor = &(args[i + n_inputs]->toTensor());
+        auto* output_tensor = &(args[i + n_inputs]->toTensor());
         ET_CHECK_OK_OR_RETURN_ERROR(
             copy_slimtensor_to_etensor_async(
-                gpu_outputs[i], cpu_output_tensor, cuda_stream),
-            "Failed to copy GPU output %zu back to CPU ETensor",
+                gpu_outputs[i], output_tensor, cuda_stream),
+            "Failed to copy GPU output %zu back to ETensor",
             i);
         delete gpu_outputs[i];
         gpu_outputs[i] = nullptr;

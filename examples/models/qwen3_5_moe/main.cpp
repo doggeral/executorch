@@ -12,15 +12,21 @@
 #include <executorch/extension/llm/runner/stats.h>
 #include <executorch/extension/llm/runner/util.h>
 #include <executorch/extension/module/module.h>
+#include <executorch/extension/module/module.h>
 #include <executorch/extension/tensor/tensor.h>
 #include <executorch/runtime/backend/interface.h>
 #include <executorch/runtime/backend/options.h>
 #include <executorch/runtime/platform/log.h>
+#include <executorch/extension/tensor/tensor_ptr.h>
+#include <executorch/runtime/core/portable_type/device.h>
 #include <pytorch/tokenizers/hf_tokenizer.h>
 
 #include <algorithm>
 #include <cinttypes>
 #include <fstream>
+#include <iostream>
+#include <numeric>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -45,7 +51,13 @@ DEFINE_bool(
     false,
     "Enable CUDA graph for decode method. CUDA only.");
 
-namespace llm = ::executorch::extension::llm;
+using namespace executorch::extension;
+using namespace executorch::runtime;
+using etensor::DeviceType;
+using executorch::aten::ScalarType;
+
+constexpr auto kDynamicBound =
+    executorch::aten::TensorShapeDynamism::DYNAMIC_BOUND;
 using ::executorch::extension::from_blob;
 using ::executorch::extension::Module;
 using ::executorch::extension::TensorPtr;
@@ -99,12 +111,17 @@ static uint64_t read_token(const executorch::aten::Tensor& output) {
 int main(int argc, char** argv) {
   gflags::ParseCommandLineFlags(&argc, &argv, true);
 
-  if (FLAGS_model_path.empty()) {
-    ET_LOG(Error, "Must specify --model_path");
+  if (FLAGS_model_path.empty() || FLAGS_tokenizer_path.empty()) {
+    std::cerr << "Must specify --model_path and --tokenizer_path" << std::endl;
     return 1;
   }
-  if (FLAGS_tokenizer_path.empty()) {
-    ET_LOG(Error, "Must specify --tokenizer_path");
+
+  // Load tokenizer.
+  auto tokenizer = std::make_unique<tokenizers::HFTokenizer>();
+  auto tok_status = tokenizer->load(FLAGS_tokenizer_path);
+  if (tok_status != tokenizers::Error::Ok) {
+    std::cerr << "Failed to load tokenizer from " << FLAGS_tokenizer_path
+              << std::endl;
     return 1;
   }
 
