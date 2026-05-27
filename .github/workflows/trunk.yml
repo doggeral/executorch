@@ -84,7 +84,7 @@ jobs:
       script: |
         #!/bin/bash
       
-        # Zephyr minimum python version is 3.12 as Executorch support 3.10 lets make sure we always get 3.12 undependent of base image
+        # Zephyr minimum Python version is 3.12; since ExecuTorch supports 3.10, ensure we always use 3.12 independent of the base image
         conda create -y -n conda_zephyr_test python=3.12 > /dev/null
         conda activate conda_zephyr_test
 
