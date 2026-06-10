@@ -100,9 +100,7 @@ class XnnpackBackend final
       lock_weights_cache.lock();
 
       const auto& cache_path = options_.get_packed_cache_path();
-      if (!cache_path.empty()) {
-        weights_cache_->set_packed_cache_path(cache_path);
-      }
+      weights_cache_->set_packed_cache_path(cache_path);
 
       weights_cache_->initialize_for_runtime(
           context.get_runtime_allocator(), named_data_map);
@@ -219,6 +217,14 @@ class XnnpackBackend final
       BackendOptionContext& context,
       const Span<BackendOption>& backend_options) override {
     for (const auto& option : backend_options) {
+      if (strcmp(option.key, xnnpack::save_packed_index_option_key) == 0) {
+        auto* val = std::get_if<bool>(&option.value);
+        if (val && *val) {
+          const std::lock_guard<std::mutex> lock(weights_cache_mutex_);
+          return weights_cache_->save_packed_index();
+        }
+        continue;
+      }
       Error err = options_.set_option(option);
       if (err != Error::Ok) {
         return err;

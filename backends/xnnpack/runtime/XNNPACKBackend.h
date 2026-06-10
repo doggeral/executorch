@@ -20,6 +20,9 @@ const char weight_cache_option_key[] = "weight_cache_enabled";
 // @lint-ignore CLANGTIDY facebook-hte-CArray
 const char packed_cache_path_option_key[] = "packed_cache_path";
 
+/// Trigger saving the packed weight index for cross-load cache reuse.
+const char save_packed_index_option_key[] = "save_packed_index";
+
 /// Workspace sharing mode. This is a backend option that can be set via the
 /// set_option API to control memory sharing between CALL_DELEGATE instances.
 /// This is useful for reducing memory consumption.
